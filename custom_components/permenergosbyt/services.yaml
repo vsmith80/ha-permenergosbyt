@@ -1,0 +1,23 @@
+send_readings:
+  name: Передать показания
+  description: >-
+    Немедленно отправляет текущие показания (из настроенных сущностей T1/T2)
+    в личный кабинет Пермэнергосбыта. Без автоповтора при ошибке — в отличие
+    от плановой ежемесячной отправки.
+  fields:
+    config_entry_id:
+      name: Запись интеграции
+      description: entry_id записи интеграции "Пермэнергосбыт" (лицевой счёт).
+      required: true
+      selector:
+        config_entry:
+          integration: permenergosbyt
+    dry_run:
+      name: Тестовый запуск
+      description: >-
+        Если включено, показания не отправляются - только пишутся в журнал
+        Home Assistant для проверки.
+      required: false
+      default: false
+      selector:
+        boolean: {}

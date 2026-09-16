@@ -1,0 +1,8 @@
+{
+  "domain": "permenergosbyt",
+  "name": "Пермэнергосбыт (передача показаний)",
+  "config_flow": true,
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}
