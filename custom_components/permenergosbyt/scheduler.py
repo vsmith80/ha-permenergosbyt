@@ -177,8 +177,9 @@ class PermEnergosbytManager:
             (
                 f"Не удалось передать показания в Пермэнергосбыт для лицевого "
                 f"счёта {account} после {len(self._campaign_offsets)} попыток. "
-                "Передайте показания вручную на lk.permenergosbyt.ru или "
-                "кнопкой интеграции."
+                "Не вышло — попробуйте передать показания вручную здесь: "
+                "[lk.permenergosbyt.ru/personal/measure_without_auth]"
+                "(https://lk.permenergosbyt.ru/personal/measure_without_auth)."
             ),
             title="Пермэнергосбыт: отправка показаний не удалась",
             notification_id=f"{NOTIFICATION_ID_FAILURE}_{self.entry.entry_id}",
