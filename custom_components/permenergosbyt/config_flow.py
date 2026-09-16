@@ -45,6 +45,8 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             account = user_input[CONF_ACCOUNT].strip()
             if not _ACCOUNT_RE.match(account):
                 errors["base"] = "invalid_account"
+            elif not 1 <= user_input[CONF_SCHEDULE_DAY] <= 28:
+                errors["base"] = "invalid_day"
             else:
                 await self.async_set_unique_id(account)
                 self._abort_if_unique_id_configured()
@@ -64,9 +66,9 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         options={
                             CONF_T1_ENTITY: user_input[CONF_T1_ENTITY],
                             CONF_T2_ENTITY: user_input[CONF_T2_ENTITY],
-                            CONF_SCHEDULE_DAY: DEFAULT_SCHEDULE_DAY,
-                            CONF_SCHEDULE_HOUR: DEFAULT_SCHEDULE_HOUR,
-                            CONF_SCHEDULE_MINUTE: DEFAULT_SCHEDULE_MINUTE,
+                            CONF_SCHEDULE_DAY: user_input[CONF_SCHEDULE_DAY],
+                            CONF_SCHEDULE_HOUR: user_input[CONF_SCHEDULE_HOUR],
+                            CONF_SCHEDULE_MINUTE: user_input[CONF_SCHEDULE_MINUTE],
                         },
                     )
 
@@ -78,6 +80,15 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_ACCOUNT): str,
                 vol.Required(CONF_T1_ENTITY, default=DEFAULT_T1_ENTITY): entity_selector,
                 vol.Required(CONF_T2_ENTITY, default=DEFAULT_T2_ENTITY): entity_selector,
+                vol.Required(
+                    CONF_SCHEDULE_DAY, default=DEFAULT_SCHEDULE_DAY
+                ): vol.All(int, vol.Range(min=1, max=28)),
+                vol.Required(
+                    CONF_SCHEDULE_HOUR, default=DEFAULT_SCHEDULE_HOUR
+                ): vol.All(int, vol.Range(min=0, max=23)),
+                vol.Required(
+                    CONF_SCHEDULE_MINUTE, default=DEFAULT_SCHEDULE_MINUTE
+                ): vol.All(int, vol.Range(min=0, max=59)),
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
