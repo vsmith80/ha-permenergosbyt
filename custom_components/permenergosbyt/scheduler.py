@@ -82,19 +82,29 @@ def _campaign_delays_hours() -> list[int]:
 
 
 def _read_readings(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, float]:
-    t1_entity, t2_entity = resolved_tariff_entities(entry)
+    """Read the current value of every tariff sensor configured for this entry.
 
-    t1_state = hass.states.get(t1_entity)
-    t2_state = hass.states.get(t2_entity)
-    if t1_state is None or t2_state is None:
-        raise HomeAssistantError(
-            f"Не найдены сущности с показаниями: {t1_entity} / {t2_entity}"
-        )
+    Works for single-, two- or three-tariff accounts alike - whichever
+    tariffs (T1, T2, T3) the user configured in resolved_tariff_entities().
+    """
+    readings: dict[str, float] = {}
+    missing: list[str] = []
+    for tariff, entity_id in resolved_tariff_entities(entry).items():
+        state = hass.states.get(entity_id)
+        if state is None:
+            missing.append(entity_id)
+            continue
+        try:
+            readings[tariff] = float(state.state)
+        except ValueError as err:
+            raise HomeAssistantError(
+                f"Значение сенсора {entity_id} ({tariff}) должно быть числом"
+            ) from err
 
-    try:
-        return {"T1": float(t1_state.state), "T2": float(t2_state.state)}
-    except ValueError as err:
-        raise HomeAssistantError("Значения в сенсорах показаний должны быть числами") from err
+    if missing:
+        raise HomeAssistantError(f"Не найдены сущности с показаниями: {', '.join(missing)}")
+
+    return readings
 
 
 class PermEnergosbytManager:
@@ -324,11 +334,11 @@ class PermEnergosbytManager:
             return False
 
         if dry_run:
+            readings_str = ", ".join(f"{tariff}={value}" for tariff, value in sorted(readings.items()))
             _LOGGER.warning(
-                "PermEnergosbyt dry_run для счёта %s: T1=%s, T2=%s (счётчик №%s) - реальная отправка НЕ выполнена",
+                "PermEnergosbyt dry_run для счёта %s: %s (счётчик №%s) - реальная отправка НЕ выполнена",
                 account,
-                readings["T1"],
-                readings["T2"],
+                readings_str,
                 form.meter_number,
             )
             return True

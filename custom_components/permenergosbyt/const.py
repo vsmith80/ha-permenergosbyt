@@ -10,9 +10,20 @@ DOMAIN = "permenergosbyt"
 CONF_ACCOUNT = "account"
 CONF_T1_ENTITY = "t1_entity_id"
 CONF_T2_ENTITY = "t2_entity_id"
+CONF_T3_ENTITY = "t3_entity_id"
 
 DEFAULT_T1_ENTITY = "sensor.energy_t1_sensor"
 DEFAULT_T2_ENTITY = "sensor.energy_t2_sensor"
+# No suggested default for T3 - a third tariff is the uncommon case, so its
+# picker starts empty rather than guessing a sensor name.
+
+# T1 is always required (every meter has at least one tariff); T2/T3 are
+# optional, supporting single-, two- and three-tariff meters.
+TARIFF_ENTITY_CONF_KEYS: dict[str, str] = {
+    "T1": CONF_T1_ENTITY,
+    "T2": CONF_T2_ENTITY,
+    "T3": CONF_T3_ENTITY,
+}
 
 # Schedule options (day-of-month + time). Stored in the config entry's
 # options (not data), editable later via the options flow.
@@ -49,12 +60,17 @@ def resolved_schedule(entry: ConfigEntry) -> tuple[int, int, int]:
     )
 
 
-def resolved_tariff_entities(entry: ConfigEntry) -> tuple[str, str]:
-    """Return (t1_entity_id, t2_entity_id) for the entry, applying defaults."""
-    return (
-        entry.options.get(CONF_T1_ENTITY, DEFAULT_T1_ENTITY),
-        entry.options.get(CONF_T2_ENTITY, DEFAULT_T2_ENTITY),
-    )
+def resolved_tariff_entities(entry: ConfigEntry) -> dict[str, str]:
+    """Return {tariff_label: entity_id} for every tariff configured on this
+    entry - T1 is always present, T2/T3 only if the user configured them
+    (this is how single-, two- and three-tariff meters are told apart).
+    """
+    result: dict[str, str] = {}
+    for tariff, conf_key in TARIFF_ENTITY_CONF_KEYS.items():
+        entity_id = entry.options.get(conf_key)
+        if entity_id:
+            result[tariff] = entity_id
+    return result
 
 
 def device_info(entry: ConfigEntry) -> DeviceInfo:
