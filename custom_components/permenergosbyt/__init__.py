@@ -24,7 +24,7 @@ from .scheduler import PermEnergosbytManager
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["button"]
+PLATFORMS = ["button", "sensor"]
 
 SEND_READINGS_SCHEMA = vol.Schema(
     {

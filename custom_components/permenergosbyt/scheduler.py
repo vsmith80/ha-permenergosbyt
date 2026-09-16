@@ -15,13 +15,16 @@ Agreed behaviour (see PLAN.md):
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
+from typing import Callable
 
 from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_call_later, async_track_time_change
+from homeassistant.util import dt as dt_util
 
 from .api import PermEnergosbytClient, PermEnergosbytError
 from .const import (
@@ -88,6 +91,33 @@ class PermEnergosbytManager:
         self._unsub_retry: callable | None = None
         self._campaign_offsets: list[int] = []
         self._campaign_index = 0
+
+        # Status of the last REAL (non dry-run) send attempt, for the
+        # diagnostic sensor - "never" | "success" | "failed".
+        self.last_status: str = "never"
+        self.last_attempt_at: datetime | None = None
+        self.last_success_at: datetime | None = None
+        self.last_error: str | None = None
+        self._status_listeners: list[Callable[[], None]] = []
+
+    def add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback fired whenever last_status/last_error change."""
+        self._status_listeners.append(callback)
+
+        def _unsub() -> None:
+            if callback in self._status_listeners:
+                self._status_listeners.remove(callback)
+
+        return _unsub
+
+    def _record_result(self, success: bool, error: str | None = None) -> None:
+        self.last_attempt_at = dt_util.now()
+        self.last_status = "success" if success else "failed"
+        self.last_error = None if success else error
+        if success:
+            self.last_success_at = self.last_attempt_at
+        for callback in list(self._status_listeners):
+            callback()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -202,7 +232,9 @@ class PermEnergosbytManager:
         account = self.entry.data[CONF_ACCOUNT]
         try:
             readings = _read_readings(self.hass, self.entry)
-        except HomeAssistantError:
+        except HomeAssistantError as err:
+            if not dry_run:
+                self._record_result(False, str(err))
             if manual:
                 raise
             _LOGGER.error("PermEnergosbyt: не удалось прочитать показания для счёта %s", account)
@@ -211,6 +243,8 @@ class PermEnergosbytManager:
         try:
             form = await self.client.fetch_measure_form()
         except PermEnergosbytError as err:
+            if not dry_run:
+                self._record_result(False, str(err))
             if manual:
                 raise HomeAssistantError(str(err)) from err
             _LOGGER.error("PermEnergosbyt: ошибка получения формы для счёта %s: %s", account, err)
@@ -229,6 +263,7 @@ class PermEnergosbytManager:
         try:
             result_html = await self.client.submit_measures(form, readings)
         except PermEnergosbytError as err:
+            self._record_result(False, str(err))
             if manual:
                 raise HomeAssistantError(str(err)) from err
             _LOGGER.error("PermEnergosbyt: ошибка отправки показаний для счёта %s: %s", account, err)
@@ -240,4 +275,5 @@ class PermEnergosbytManager:
         # the lk.permenergosbyt.ru cabinet after the first real send and
         # tighten this check if the site returns errors with a 2xx status.
         _LOGGER.debug("PermEnergosbyt: ответ сервера после отправки для счёта %s: %s", account, result_html)
+        self._record_result(True)
         return True
