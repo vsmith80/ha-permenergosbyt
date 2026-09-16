@@ -4,5 +4,8 @@
   "config_flow": true,
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "documentation": "https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME",
+  "issue_tracker": "https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/issues",
+  "codeowners": ["@YOUR_GITHUB_USERNAME"]
 }
