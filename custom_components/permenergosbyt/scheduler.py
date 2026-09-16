@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
-from typing import Callable
 
 from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.util import dt as dt_util
 
@@ -39,6 +39,7 @@ from .const import (
     DEFAULT_SCHEDULE_MINUTE,
     DEFAULT_T1_ENTITY,
     DEFAULT_T2_ENTITY,
+    DOMAIN,
     NOTIFICATION_ID_FAILURE,
     RETRY_ATTEMPTS_PER_DAY,
     RETRY_INTERVAL_HOURS,
@@ -46,6 +47,11 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def status_signal(entry_id: str) -> str:
+    """Dispatcher signal name used to announce last-send-status changes."""
+    return f"{DOMAIN}_{entry_id}_status"
 
 
 def _campaign_offsets_hours() -> list[int]:
@@ -93,22 +99,33 @@ class PermEnergosbytManager:
         self._campaign_index = 0
 
         # Status of the last REAL (non dry-run) send attempt, for the
-        # diagnostic sensor - "never" | "success" | "failed".
+        # diagnostic sensor - "never" | "success" | "failed". Broadcast via
+        # the dispatcher (status_signal) rather than a bespoke callback list,
+        # so listener exceptions are isolated/logged by HA core instead of
+        # propagating into _attempt()/_record_result().
         self.last_status: str = "never"
         self.last_attempt_at: datetime | None = None
         self.last_success_at: datetime | None = None
         self.last_error: str | None = None
-        self._status_listeners: list[Callable[[], None]] = []
 
-    def add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
-        """Register a callback fired whenever last_status/last_error change."""
-        self._status_listeners.append(callback)
+    def restore_status(
+        self,
+        status: str,
+        attempt_at: datetime | None,
+        success_at: datetime | None,
+        error: str | None,
+    ) -> None:
+        """Restore status from the sensor's last known state after a HA restart.
 
-        def _unsub() -> None:
-            if callback in self._status_listeners:
-                self._status_listeners.remove(callback)
-
-        return _unsub
+        Only applies if nothing has happened yet this session, so a restore
+        racing with a real, fresh result can never clobber it.
+        """
+        if self.last_status != "never" or status not in ("success", "failed"):
+            return
+        self.last_status = status
+        self.last_attempt_at = attempt_at
+        self.last_success_at = success_at
+        self.last_error = error
 
     def _record_result(self, success: bool, error: str | None = None) -> None:
         self.last_attempt_at = dt_util.now()
@@ -116,8 +133,7 @@ class PermEnergosbytManager:
         self.last_error = None if success else error
         if success:
             self.last_success_at = self.last_attempt_at
-        for callback in list(self._status_listeners):
-            callback()
+        async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
 
     # -- lifecycle -----------------------------------------------------
 

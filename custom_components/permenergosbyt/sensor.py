@@ -5,10 +5,13 @@ from __future__ import annotations
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_ACCOUNT, DOMAIN
-from .scheduler import PermEnergosbytManager
+from .scheduler import PermEnergosbytManager, status_signal
 
 _STATE_LABELS = {
     "never": "Ещё не отправлялось",
@@ -24,11 +27,12 @@ async def async_setup_entry(
     async_add_entities([PermEnergosbytStatusSensor(entry, manager)])
 
 
-class PermEnergosbytStatusSensor(SensorEntity):
+class PermEnergosbytStatusSensor(SensorEntity, RestoreEntity):
     """Shows success/failure of the last real send attempt, for diagnostics.
 
     Ignores dry_run calls on purpose - this reflects production sends only,
-    scheduled or manual.
+    scheduled or manual. Survives HA restarts via RestoreEntity, since the
+    manager itself only tracks status in memory for the running session.
     """
 
     _attr_has_entity_name = True
@@ -37,8 +41,8 @@ class PermEnergosbytStatusSensor(SensorEntity):
     _attr_should_poll = False
 
     def __init__(self, entry: ConfigEntry, manager: PermEnergosbytManager) -> None:
+        self._entry_id = entry.entry_id
         self._manager = manager
-        self._unsub: callable | None = None
         self._attr_unique_id = f"{entry.entry_id}_last_send_status"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
@@ -47,12 +51,27 @@ class PermEnergosbytStatusSensor(SensorEntity):
         }
 
     async def async_added_to_hass(self) -> None:
-        self._unsub = self._manager.add_status_listener(self.async_write_ha_state)
+        await super().async_added_to_hass()
 
-    async def async_will_remove_from_hass(self) -> None:
-        if self._unsub is not None:
-            self._unsub()
-            self._unsub = None
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            status = last_state.attributes.get("status_code")
+            self._manager.restore_status(
+                status=status,
+                attempt_at=dt_util.parse_datetime(
+                    last_state.attributes.get("last_attempt_at") or ""
+                ),
+                success_at=dt_util.parse_datetime(
+                    last_state.attributes.get("last_success_at") or ""
+                ),
+                error=last_state.attributes.get("last_error"),
+            )
+
+        self.async_on_unload(
+            async_dispatcher_connect(
+                self.hass, status_signal(self._entry_id), self.async_write_ha_state
+            )
+        )
 
     @property
     def native_value(self) -> str:
@@ -61,6 +80,7 @@ class PermEnergosbytStatusSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, str | None]:
         return {
+            "status_code": self._manager.last_status,
             "last_attempt_at": (
                 self._manager.last_attempt_at.isoformat()
                 if self._manager.last_attempt_at
