@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ACCOUNT, DOMAIN
+from .const import DOMAIN, device_info
 from .scheduler import PermEnergosbytManager
 
 
@@ -28,11 +28,7 @@ class PermEnergosbytSendButton(ButtonEntity):
     def __init__(self, entry: ConfigEntry, manager: PermEnergosbytManager) -> None:
         self._manager = manager
         self._attr_unique_id = f"{entry.entry_id}_send_now"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": f"Пермэнергосбыт {entry.data[CONF_ACCOUNT]}",
-            "manufacturer": "ПАО Пермэнергосбыт",
-        }
+        self._attr_device_info = device_info(entry)
 
     async def async_press(self) -> None:
         await self._manager.async_send_now(dry_run=False)

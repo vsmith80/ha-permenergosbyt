@@ -20,7 +20,7 @@ from .const import (
     DOMAIN,
     SERVICE_SEND_READINGS,
 )
-from .scheduler import PermEnergosbytManager
+from .scheduler import PermEnergosbytManager, async_remove_campaign_store
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     manager = PermEnergosbytManager(hass, entry, client)
     manager.async_setup()
+    await manager.async_restore_campaign()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = manager
 
@@ -54,19 +55,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Options (schedule day/time) changed - restart the schedule watcher."""
+    """Options (schedule day/time, T1/T2 mapping) changed.
+
+    Only re-arms the schedule watcher with the new hour/minute -
+    deliberately does NOT call manager.async_unload() first, since that
+    would also cancel any retry currently pending for this month's
+    campaign. async_setup() replaces just its own subscription, so a
+    campaign in progress is left untouched.
+    """
     manager: PermEnergosbytManager = hass.data[DOMAIN][entry.entry_id]
-    manager.async_unload()
     manager.async_setup()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry (integration reload or removal)."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         manager: PermEnergosbytManager = hass.data[DOMAIN].pop(entry.entry_id)
         manager.async_unload()
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Clean up persisted campaign state once the config entry is deleted."""
+    await async_remove_campaign_store(hass, entry.entry_id)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:

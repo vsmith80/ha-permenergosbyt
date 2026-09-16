@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_ACCOUNT, DOMAIN
+from .const import DOMAIN, device_info
 from .scheduler import PermEnergosbytManager, status_signal
 
 _STATE_LABELS = {
@@ -18,6 +18,14 @@ _STATE_LABELS = {
     "success": "Успешно",
     "failed": "Ошибка",
 }
+
+
+def _iso_or_none(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _parsed_datetime_or_none(raw: str | None):
+    return dt_util.parse_datetime(raw) if raw else None
 
 
 async def async_setup_entry(
@@ -44,26 +52,17 @@ class PermEnergosbytStatusSensor(SensorEntity, RestoreEntity):
         self._entry_id = entry.entry_id
         self._manager = manager
         self._attr_unique_id = f"{entry.entry_id}_last_send_status"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": f"Пермэнергосбыт {entry.data[CONF_ACCOUNT]}",
-            "manufacturer": "ПАО Пермэнергосбыт",
-        }
+        self._attr_device_info = device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 
         last_state = await self.async_get_last_state()
         if last_state is not None:
-            status = last_state.attributes.get("status_code")
             self._manager.restore_status(
-                status=status,
-                attempt_at=dt_util.parse_datetime(
-                    last_state.attributes.get("last_attempt_at") or ""
-                ),
-                success_at=dt_util.parse_datetime(
-                    last_state.attributes.get("last_success_at") or ""
-                ),
+                status=last_state.attributes.get("status_code"),
+                attempt_at=_parsed_datetime_or_none(last_state.attributes.get("last_attempt_at")),
+                success_at=_parsed_datetime_or_none(last_state.attributes.get("last_success_at")),
                 error=last_state.attributes.get("last_error"),
             )
 
@@ -75,21 +74,13 @@ class PermEnergosbytStatusSensor(SensorEntity, RestoreEntity):
 
     @property
     def native_value(self) -> str:
-        return _STATE_LABELS.get(self._manager.last_status, self._manager.last_status)
+        return _STATE_LABELS[self._manager.last_status]
 
     @property
     def extra_state_attributes(self) -> dict[str, str | None]:
         return {
             "status_code": self._manager.last_status,
-            "last_attempt_at": (
-                self._manager.last_attempt_at.isoformat()
-                if self._manager.last_attempt_at
-                else None
-            ),
-            "last_success_at": (
-                self._manager.last_success_at.isoformat()
-                if self._manager.last_success_at
-                else None
-            ),
+            "last_attempt_at": _iso_or_none(self._manager.last_attempt_at),
+            "last_success_at": _iso_or_none(self._manager.last_success_at),
             "last_error": self._manager.last_error,
         }

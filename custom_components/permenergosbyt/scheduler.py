@@ -11,6 +11,12 @@ Agreed behaviour (see PLAN.md):
   - A manual send (service call / button) makes exactly one attempt, raises
     immediately on failure, and never retries - but on success it cancels
     any automatic retry still pending for the current campaign.
+
+Campaign progress (which attempt we're on) is persisted via Store so it
+survives a Home Assistant restart. It is *not* touched by an options-flow
+save - async_setup() only ever replaces the schedule-watcher subscription,
+never the pending retry, so editing e.g. the T1 sensor mid-retry doesn't
+silently drop the rest of the month's attempts.
 """
 
 from __future__ import annotations
@@ -24,29 +30,25 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .api import PermEnergosbytClient, PermEnergosbytError
 from .const import (
     CONF_ACCOUNT,
-    CONF_SCHEDULE_DAY,
-    CONF_SCHEDULE_HOUR,
-    CONF_SCHEDULE_MINUTE,
-    CONF_T1_ENTITY,
-    CONF_T2_ENTITY,
-    DEFAULT_SCHEDULE_DAY,
-    DEFAULT_SCHEDULE_HOUR,
-    DEFAULT_SCHEDULE_MINUTE,
-    DEFAULT_T1_ENTITY,
-    DEFAULT_T2_ENTITY,
     DOMAIN,
     NOTIFICATION_ID_FAILURE,
     RETRY_ATTEMPTS_PER_DAY,
     RETRY_INTERVAL_HOURS,
     RETRY_MAX_DAYS,
+    TOTAL_CAMPAIGN_ATTEMPTS,
+    resolved_schedule,
+    resolved_tariff_entities,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_CAMPAIGN_STORE_VERSION = 1
 
 
 def status_signal(entry_id: str) -> str:
@@ -54,23 +56,33 @@ def status_signal(entry_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_status"
 
 
-def _campaign_offsets_hours() -> list[int]:
-    """Hour offsets from campaign start for every attempt.
+def _campaign_store_key(entry_id: str) -> str:
+    return f"{DOMAIN}_{entry_id}_campaign"
 
-    E.g. with 3 attempts/day, 2h apart, over 2 days: [0, 2, 4, 24, 26, 28].
+
+async def async_remove_campaign_store(hass: HomeAssistant, entry_id: str) -> None:
+    """Delete persisted campaign state for an entry (called on entry removal)."""
+    await Store(hass, _CAMPAIGN_STORE_VERSION, _campaign_store_key(entry_id)).async_remove()
+
+
+def _campaign_delays_hours() -> list[int]:
+    """Hours to wait before each retry, in order.
+
+    E.g. with 3 attempts/day, 2h apart, over 2 days: [2, 2, 20, 2, 2] -
+    attempt 1 fires immediately when the campaign starts; each entry here
+    is the gap before the *next* attempt (the day-rollover gap works out to
+    24 - (RETRY_ATTEMPTS_PER_DAY-1)*RETRY_INTERVAL_HOURS automatically).
     """
-    return [
+    offsets = [
         day * 24 + attempt * RETRY_INTERVAL_HOURS
         for day in range(RETRY_MAX_DAYS)
         for attempt in range(RETRY_ATTEMPTS_PER_DAY)
     ]
+    return [after - before for before, after in zip(offsets, offsets[1:])]
 
 
 def _read_readings(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, float]:
-    # T1/T2 sensor mapping lives in options (editable via the options flow
-    # without removing/re-adding the integration), not in data.
-    t1_entity = entry.options.get(CONF_T1_ENTITY, DEFAULT_T1_ENTITY)
-    t2_entity = entry.options.get(CONF_T2_ENTITY, DEFAULT_T2_ENTITY)
+    t1_entity, t2_entity = resolved_tariff_entities(entry)
 
     t1_state = hass.states.get(t1_entity)
     t2_state = hass.states.get(t2_entity)
@@ -95,8 +107,11 @@ class PermEnergosbytManager:
 
         self._unsub_schedule: callable | None = None
         self._unsub_retry: callable | None = None
-        self._campaign_offsets: list[int] = []
+        self._campaign_delays: list[int] = []
         self._campaign_index = 0
+        self._campaign_store = Store[dict](
+            hass, _CAMPAIGN_STORE_VERSION, _campaign_store_key(entry.entry_id)
+        )
 
         # Status of the last REAL (non dry-run) send attempt, for the
         # diagnostic sensor - "never" | "success" | "failed". Broadcast via
@@ -110,7 +125,7 @@ class PermEnergosbytManager:
 
     def restore_status(
         self,
-        status: str,
+        status: str | None,
         attempt_at: datetime | None,
         success_at: datetime | None,
         error: str | None,
@@ -138,16 +153,49 @@ class PermEnergosbytManager:
     # -- lifecycle -----------------------------------------------------
 
     def async_setup(self) -> None:
-        """Start watching the clock for the configured send day/time."""
-        hour = self.entry.options.get(CONF_SCHEDULE_HOUR, DEFAULT_SCHEDULE_HOUR)
-        minute = self.entry.options.get(CONF_SCHEDULE_MINUTE, DEFAULT_SCHEDULE_MINUTE)
+        """(Re-)start watching the clock for the configured send day/time.
 
+        Safe to call again later (e.g. after an options-flow save changes
+        the hour/minute) - it only replaces its own schedule-watcher
+        subscription and never touches a retry already in progress.
+        """
+        if self._unsub_schedule is not None:
+            self._unsub_schedule()
+            self._unsub_schedule = None
+
+        _, hour, minute = resolved_schedule(self.entry)
         self._unsub_schedule = async_track_time_change(
             self.hass, self._handle_time_tick, hour=hour, minute=minute, second=0
         )
 
+    async def async_restore_campaign(self) -> None:
+        """Resume a retry campaign left in progress by a HA restart.
+
+        We don't know how long HA was offline, so we don't try to honour
+        the original wall-clock retry times - we just pick the campaign
+        back up immediately and continue its remaining attempts from now.
+        """
+        data = await self._campaign_store.async_load()
+        index = data.get("campaign_index") if data else None
+        if not index:
+            return
+        if index >= TOTAL_CAMPAIGN_ATTEMPTS:
+            await self._clear_campaign_store()
+            return
+
+        _LOGGER.warning(
+            "PermEnergosbyt: возобновляем кампанию отправки для счёта %s, "
+            "прерванную перезапуском Home Assistant (было выполнено %d/%d попыток)",
+            self.entry.data[CONF_ACCOUNT],
+            index,
+            TOTAL_CAMPAIGN_ATTEMPTS,
+        )
+        self._campaign_delays = _campaign_delays_hours()
+        self._campaign_index = index
+        await self._run_campaign_attempt()
+
     def async_unload(self) -> None:
-        """Stop all pending timers for this entry."""
+        """Stop everything for this entry (used only on actual unload/removal)."""
         if self._unsub_schedule is not None:
             self._unsub_schedule()
             self._unsub_schedule = None
@@ -158,10 +206,16 @@ class PermEnergosbytManager:
             self._unsub_retry()
             self._unsub_retry = None
 
+    async def _save_campaign_store(self) -> None:
+        await self._campaign_store.async_save({"campaign_index": self._campaign_index})
+
+    async def _clear_campaign_store(self) -> None:
+        await self._campaign_store.async_remove()
+
     # -- scheduled campaign ---------------------------------------------
 
     def _handle_time_tick(self, now) -> None:
-        scheduled_day = self.entry.options.get(CONF_SCHEDULE_DAY, DEFAULT_SCHEDULE_DAY)
+        scheduled_day, _, _ = resolved_schedule(self.entry)
         if now.day != scheduled_day:
             return
         self.hass.async_create_task(self._start_campaign())
@@ -172,7 +226,7 @@ class PermEnergosbytManager:
             self.entry.data[CONF_ACCOUNT],
         )
         self._cancel_pending_retry()
-        self._campaign_offsets = _campaign_offsets_hours()
+        self._campaign_delays = _campaign_delays_hours()
         self._campaign_index = 0
         await self._run_campaign_attempt()
 
@@ -186,25 +240,25 @@ class PermEnergosbytManager:
                 self._campaign_index,
             )
             self._cancel_pending_retry()
+            await self._clear_campaign_store()
             return
 
-        if self._campaign_index < len(self._campaign_offsets):
-            delay_hours = (
-                self._campaign_offsets[self._campaign_index]
-                - self._campaign_offsets[self._campaign_index - 1]
-            )
+        if self._campaign_index < TOTAL_CAMPAIGN_ATTEMPTS:
+            delay_hours = self._campaign_delays[self._campaign_index - 1]
             _LOGGER.warning(
                 "PermEnergosbyt: попытка %d/%d для счёта %s не удалась, повтор через %d ч",
                 self._campaign_index,
-                len(self._campaign_offsets),
+                TOTAL_CAMPAIGN_ATTEMPTS,
                 self.entry.data[CONF_ACCOUNT],
                 delay_hours,
             )
+            await self._save_campaign_store()
             self._unsub_retry = async_call_later(
                 self.hass, delay_hours * 3600, self._handle_retry_timer
             )
         else:
             await self._notify_failure()
+            await self._clear_campaign_store()
 
     async def _handle_retry_timer(self, _now) -> None:
         self._unsub_retry = None
@@ -215,14 +269,14 @@ class PermEnergosbytManager:
         _LOGGER.error(
             "PermEnergosbyt: не удалось отправить показания для счёта %s после %d попыток за %d дн.",
             account,
-            len(self._campaign_offsets),
+            TOTAL_CAMPAIGN_ATTEMPTS,
             RETRY_MAX_DAYS,
         )
         async_create_notification(
             self.hass,
             (
                 f"Не удалось передать показания в Пермэнергосбыт для лицевого "
-                f"счёта {account} после {len(self._campaign_offsets)} попыток. "
+                f"счёта {account} после {TOTAL_CAMPAIGN_ATTEMPTS} попыток. "
                 "Не вышло — попробуйте передать показания вручную здесь: "
                 "[lk.permenergosbyt.ru](https://lk.permenergosbyt.ru/)."
             ),
@@ -233,14 +287,17 @@ class PermEnergosbytManager:
     # -- manual send ------------------------------------------------------
 
     async def async_send_now(self, dry_run: bool = False) -> None:
-        """Manual, single-attempt send (service call / button). Raises on failure."""
-        success = await self._attempt(manual=True, dry_run=dry_run)
-        if success:
-            # A manual send makes any pending automatic retry for this
-            # month's campaign redundant.
-            self._cancel_pending_retry()
-        elif not dry_run:
-            raise HomeAssistantError("Не удалось отправить показания (см. журнал Home Assistant)")
+        """Manual, single-attempt send (service call / button).
+
+        _attempt(manual=True, ...) always raises on failure, so reaching
+        the end of this method means the attempt succeeded.
+        """
+        await self._attempt(manual=True, dry_run=dry_run)
+        # A successful manual send makes any pending automatic retry for
+        # this month's campaign redundant.
+        self._cancel_pending_retry()
+        if not dry_run:
+            await self._clear_campaign_store()
 
     # -- shared single attempt --------------------------------------------
 

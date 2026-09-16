@@ -1,5 +1,10 @@
 """Constants for the Perm Energosbyt integration."""
 
+from __future__ import annotations
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.device_registry import DeviceInfo
+
 DOMAIN = "permenergosbyt"
 
 CONF_ACCOUNT = "account"
@@ -26,9 +31,36 @@ DEFAULT_SCHEDULE_MINUTE = 0
 RETRY_ATTEMPTS_PER_DAY = 3
 RETRY_INTERVAL_HOURS = 2
 RETRY_MAX_DAYS = 2
+TOTAL_CAMPAIGN_ATTEMPTS = RETRY_ATTEMPTS_PER_DAY * RETRY_MAX_DAYS
 
 SERVICE_SEND_READINGS = "send_readings"
 ATTR_DRY_RUN = "dry_run"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 
 NOTIFICATION_ID_FAILURE = f"{DOMAIN}_send_failed"
+
+
+def resolved_schedule(entry: ConfigEntry) -> tuple[int, int, int]:
+    """Return (day, hour, minute) for the entry, applying defaults."""
+    return (
+        entry.options.get(CONF_SCHEDULE_DAY, DEFAULT_SCHEDULE_DAY),
+        entry.options.get(CONF_SCHEDULE_HOUR, DEFAULT_SCHEDULE_HOUR),
+        entry.options.get(CONF_SCHEDULE_MINUTE, DEFAULT_SCHEDULE_MINUTE),
+    )
+
+
+def resolved_tariff_entities(entry: ConfigEntry) -> tuple[str, str]:
+    """Return (t1_entity_id, t2_entity_id) for the entry, applying defaults."""
+    return (
+        entry.options.get(CONF_T1_ENTITY, DEFAULT_T1_ENTITY),
+        entry.options.get(CONF_T2_ENTITY, DEFAULT_T2_ENTITY),
+    )
+
+
+def device_info(entry: ConfigEntry) -> DeviceInfo:
+    """Shared device grouping for every entity of one лицевой счёт."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=f"Пермэнергосбыт {entry.data[CONF_ACCOUNT]}",
+        manufacturer="ПАО Пермэнергосбыт",
+    )

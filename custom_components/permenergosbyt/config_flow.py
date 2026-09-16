@@ -26,9 +26,30 @@ from .const import (
     DEFAULT_T1_ENTITY,
     DEFAULT_T2_ENTITY,
     DOMAIN,
+    resolved_schedule,
+    resolved_tariff_entities,
 )
 
 _ACCOUNT_RE = re.compile(r"^\d{10,11}$")
+
+
+def _tariff_and_schedule_schema(
+    t1_default: str, t2_default: str, day_default: int, hour_default: int, minute_default: int
+) -> dict:
+    """Shared T1/T2 + schedule fields for both the setup and options forms.
+
+    Returns a plain dict of schema entries so callers can merge in whatever
+    else they need (e.g. the account field, setup-only) before wrapping it
+    in vol.Schema.
+    """
+    entity_selector = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+    return {
+        vol.Required(CONF_T1_ENTITY, default=t1_default): entity_selector,
+        vol.Required(CONF_T2_ENTITY, default=t2_default): entity_selector,
+        vol.Required(CONF_SCHEDULE_DAY, default=day_default): vol.All(int, vol.Range(min=1, max=28)),
+        vol.Required(CONF_SCHEDULE_HOUR, default=hour_default): vol.All(int, vol.Range(min=0, max=23)),
+        vol.Required(CONF_SCHEDULE_MINUTE, default=minute_default): vol.All(int, vol.Range(min=0, max=59)),
+    }
 
 
 class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -45,9 +66,11 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             account = user_input[CONF_ACCOUNT].strip()
             if not _ACCOUNT_RE.match(account):
                 errors["base"] = "invalid_account"
-            elif not 1 <= user_input[CONF_SCHEDULE_DAY] <= 28:
-                errors["base"] = "invalid_day"
             else:
+                # Note: the schedule-day range is already enforced by the
+                # schema below (vol.Range(min=1, max=28)) - Home Assistant
+                # validates user_input against it before this method is
+                # ever called again, so no separate check is needed here.
                 await self.async_set_unique_id(account)
                 self._abort_if_unique_id_configured()
 
@@ -72,23 +95,16 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         },
                     )
 
-        entity_selector = selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
-        )
         schema = vol.Schema(
             {
                 vol.Required(CONF_ACCOUNT): str,
-                vol.Required(CONF_T1_ENTITY, default=DEFAULT_T1_ENTITY): entity_selector,
-                vol.Required(CONF_T2_ENTITY, default=DEFAULT_T2_ENTITY): entity_selector,
-                vol.Required(
-                    CONF_SCHEDULE_DAY, default=DEFAULT_SCHEDULE_DAY
-                ): vol.All(int, vol.Range(min=1, max=28)),
-                vol.Required(
-                    CONF_SCHEDULE_HOUR, default=DEFAULT_SCHEDULE_HOUR
-                ): vol.All(int, vol.Range(min=0, max=23)),
-                vol.Required(
-                    CONF_SCHEDULE_MINUTE, default=DEFAULT_SCHEDULE_MINUTE
-                ): vol.All(int, vol.Range(min=0, max=59)),
+                **_tariff_and_schedule_schema(
+                    DEFAULT_T1_ENTITY,
+                    DEFAULT_T2_ENTITY,
+                    DEFAULT_SCHEDULE_DAY,
+                    DEFAULT_SCHEDULE_HOUR,
+                    DEFAULT_SCHEDULE_MINUTE,
+                ),
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
@@ -111,40 +127,15 @@ class PermEnergosbytOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        errors: dict[str, str] = {}
-
+        # The schedule-day range is enforced by the schema below, so any
+        # submitted value reaching this line is already valid - no manual
+        # re-check needed (see the same note in async_step_user).
         if user_input is not None:
-            if not 1 <= user_input[CONF_SCHEDULE_DAY] <= 28:
-                errors["base"] = "invalid_day"
-            else:
-                return self.async_create_entry(data=user_input)
+            return self.async_create_entry(data=user_input)
 
-        options = self._config_entry.options
-        entity_selector = selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
-        )
+        t1_default, t2_default = resolved_tariff_entities(self._config_entry)
+        day_default, hour_default, minute_default = resolved_schedule(self._config_entry)
         schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_T1_ENTITY,
-                    default=options.get(CONF_T1_ENTITY, DEFAULT_T1_ENTITY),
-                ): entity_selector,
-                vol.Required(
-                    CONF_T2_ENTITY,
-                    default=options.get(CONF_T2_ENTITY, DEFAULT_T2_ENTITY),
-                ): entity_selector,
-                vol.Required(
-                    CONF_SCHEDULE_DAY,
-                    default=options.get(CONF_SCHEDULE_DAY, DEFAULT_SCHEDULE_DAY),
-                ): vol.All(int, vol.Range(min=1, max=28)),
-                vol.Required(
-                    CONF_SCHEDULE_HOUR,
-                    default=options.get(CONF_SCHEDULE_HOUR, DEFAULT_SCHEDULE_HOUR),
-                ): vol.All(int, vol.Range(min=0, max=23)),
-                vol.Required(
-                    CONF_SCHEDULE_MINUTE,
-                    default=options.get(CONF_SCHEDULE_MINUTE, DEFAULT_SCHEDULE_MINUTE),
-                ): vol.All(int, vol.Range(min=0, max=59)),
-            }
+            _tariff_and_schedule_schema(t1_default, t2_default, day_default, hour_default, minute_default)
         )
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="init", data_schema=schema)
