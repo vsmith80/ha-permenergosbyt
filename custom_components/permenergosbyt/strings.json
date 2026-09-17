@@ -2,53 +2,53 @@
   "config": {
     "step": {
       "user": {
-        "title": "Пермэнергосбыт: лицевой счёт",
-        "description": "Укажите лицевой счёт. Интеграция сама определит по сайту, сколько у счётчика тарифов, и на следующем шаге попросит указать сенсоры для каждого из них.",
+        "title": "Perm Energosbyt: account number",
+        "description": "Enter your account number (лицевой счёт). The integration will check the site to find out how many tariffs your meter has, and will ask for a sensor for each one on the next step.",
         "data": {
-          "account": "Лицевой счёт (10-11 цифр)"
+          "account": "Account number (10-11 digits)"
         }
       },
       "tariffs": {
-        "title": "Пермэнергосбыт: сенсоры и расписание",
-        "description": "По данным сайта у вашего счётчика тарифы: {tariffs_summary}. Укажите, в каких сенсорах Home Assistant лежат текущие показания по каждому тарифу, и когда отправлять показания автоматически. Перед сохранением интеграция проверит, что выбранные сенсоры существуют и отдают число.\n\nВАЖНО: выбирайте дату отправки не менее чем за 2 дня до окончания срока приёма показаний. При сбое сайта интеграция повторяет попытку несколько раз в течение 2 дней — этот запас нужен, чтобы повторные попытки успели пройти, а если и они не сработают, у вас осталось время передать показания вручную до конца срока.",
+        "title": "Perm Energosbyt: sensors and schedule",
+        "description": "According to the site, your meter has these tariffs: {tariffs_summary}. Specify which Home Assistant sensors hold the current reading for each tariff, and when to send readings automatically. Before saving, the integration checks that the selected sensors exist and return a number.\n\nIMPORTANT: pick a send date at least 2 days before your reading submission deadline. If the site is unavailable, the integration retries several times over 2 days - this margin lets the retries run, and leaves you time to submit readings manually before the deadline if they all fail.",
         "data": {
-          "t1_entity_id": "Сущность с показанием Т1",
-          "t2_entity_id": "Сущность с показанием Т2",
-          "t3_entity_id": "Сущность с показанием Т3",
-          "schedule_day": "День месяца для отправки",
-          "schedule_hour": "Час отправки",
-          "schedule_minute": "Минута отправки"
+          "t1_entity_id": "Sensor with the T1 reading",
+          "t2_entity_id": "Sensor with the T2 reading",
+          "t3_entity_id": "Sensor with the T3 reading",
+          "schedule_day": "Day of month to send on",
+          "schedule_hour": "Hour to send at",
+          "schedule_minute": "Minute to send at"
         }
       }
     },
     "error": {
-      "invalid_account": "Лицевой счёт должен состоять из 10 или 11 цифр",
-      "account_not_found": "Лицевой счёт не найден на сайте lk.permenergosbyt.ru",
-      "cannot_connect": "Не удалось подключиться к lk.permenergosbyt.ru",
-      "unsupported_tariff_count": "У этого счётчика тариф вне поддерживаемого диапазона Т1-Т3 — интеграция пока не умеет с ним работать",
-      "sensor_check_failed": "Не удалось прочитать показания с выбранных сенсоров: {sensor_error}"
+      "invalid_account": "The account number must be 10 or 11 digits",
+      "account_not_found": "Account number not found on lk.permenergosbyt.ru",
+      "cannot_connect": "Could not connect to lk.permenergosbyt.ru",
+      "unsupported_tariff_count": "This meter has a tariff outside the supported T1-T3 range - the integration can't handle it yet",
+      "sensor_check_failed": "Could not read the readings from the selected sensors: {sensor_error}"
     },
     "abort": {
-      "already_configured": "Этот лицевой счёт уже добавлен"
+      "already_configured": "This account is already configured"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Пермэнергосбыт: настройки",
-        "description": "Сенсоры с показаниями и расписание автоматической отправки. Число месяца — от 1 до 28, чтобы не зависеть от длины месяца. Набор тарифов был определён при установке по данным сайта и здесь не меняется — только то, какой сенсор к какому тарифу привязан. Перед сохранением интеграция проверит, что выбранные сенсоры существуют и отдают число.\n\nВАЖНО: выбирайте дату отправки не менее чем за 2 дня до окончания срока приёма показаний — это запас на случай сбоя сайта (повторные попытки идут до 2 дней) и на ручную отправку, если все попытки всё же не удались.",
+        "title": "Perm Energosbyt: settings",
+        "description": "Reading sensors and the automatic send schedule. The day of month is 1-28, so it doesn't depend on the month's length. The set of tariffs was determined at setup from the site's data and can't be changed here - only which sensor is mapped to which tariff. Before saving, the integration checks that the selected sensors exist and return a number.\n\nIMPORTANT: pick a send date at least 2 days before your reading submission deadline - this is a margin for a site outage (retries run for up to 2 days) and for a manual send if every retry still fails.",
         "data": {
-          "t1_entity_id": "Сущность с показанием Т1",
-          "t2_entity_id": "Сущность с показанием Т2",
-          "t3_entity_id": "Сущность с показанием Т3",
-          "schedule_day": "День месяца",
-          "schedule_hour": "Час",
-          "schedule_minute": "Минута"
+          "t1_entity_id": "Sensor with the T1 reading",
+          "t2_entity_id": "Sensor with the T2 reading",
+          "t3_entity_id": "Sensor with the T3 reading",
+          "schedule_day": "Day of month",
+          "schedule_hour": "Hour",
+          "schedule_minute": "Minute"
         }
       }
     },
     "error": {
-      "sensor_check_failed": "Не удалось прочитать показания с выбранных сенсоров: {sensor_error}"
+      "sensor_check_failed": "Could not read the readings from the selected sensors: {sensor_error}"
     }
   }
 }
