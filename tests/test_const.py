@@ -8,6 +8,7 @@ full framework for what is otherwise plain-function logic.
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +56,51 @@ def test_resolved_schedule_falls_back_per_field():
         const.DEFAULT_SCHEDULE_HOUR,
         const.DEFAULT_SCHEDULE_MINUTE,
     )
+
+
+# -- next_configured_occurrence -----------------------------------------------
+
+
+def test_next_configured_occurrence_later_this_month():
+    entry = _entry(options={
+        const.CONF_SCHEDULE_DAY: 20,
+        const.CONF_SCHEDULE_HOUR: 9,
+        const.CONF_SCHEDULE_MINUTE: 0,
+    })
+    now = datetime(2026, 9, 10, 12, 0, 0)
+    assert const.next_configured_occurrence(entry, now) == datetime(2026, 9, 20, 9, 0, 0)
+
+
+def test_next_configured_occurrence_rolls_to_next_month_when_already_passed():
+    entry = _entry(options={
+        const.CONF_SCHEDULE_DAY: 20,
+        const.CONF_SCHEDULE_HOUR: 9,
+        const.CONF_SCHEDULE_MINUTE: 0,
+    })
+    now = datetime(2026, 9, 25, 0, 0, 0)
+    assert const.next_configured_occurrence(entry, now) == datetime(2026, 10, 20, 9, 0, 0)
+
+
+def test_next_configured_occurrence_rolls_when_exactly_at_now():
+    # At the exact configured moment, the occurrence is already "used up"
+    # (it's what triggered the send) - the next one is next month.
+    entry = _entry(options={
+        const.CONF_SCHEDULE_DAY: 20,
+        const.CONF_SCHEDULE_HOUR: 9,
+        const.CONF_SCHEDULE_MINUTE: 0,
+    })
+    now = datetime(2026, 9, 20, 9, 0, 0)
+    assert const.next_configured_occurrence(entry, now) == datetime(2026, 10, 20, 9, 0, 0)
+
+
+def test_next_configured_occurrence_rolls_over_year_boundary():
+    entry = _entry(options={
+        const.CONF_SCHEDULE_DAY: 20,
+        const.CONF_SCHEDULE_HOUR: 9,
+        const.CONF_SCHEDULE_MINUTE: 0,
+    })
+    now = datetime(2026, 12, 25, 0, 0, 0)
+    assert const.next_configured_occurrence(entry, now) == datetime(2027, 1, 20, 9, 0, 0)
 
 
 # -- resolved_tariff_entities --------------------------------------------------

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
 
@@ -58,6 +60,25 @@ def resolved_schedule(entry: ConfigEntry) -> tuple[int, int, int]:
         entry.options.get(CONF_SCHEDULE_HOUR, DEFAULT_SCHEDULE_HOUR),
         entry.options.get(CONF_SCHEDULE_MINUTE, DEFAULT_SCHEDULE_MINUTE),
     )
+
+
+def next_configured_occurrence(entry: ConfigEntry, now: datetime) -> datetime:
+    """Next day/hour/minute from the schedule options, strictly after `now`.
+
+    Pure calendar math on the datetime the caller passes in (no timezone
+    handling here - `now` is expected to already be in the right zone, e.g.
+    via homeassistant.util.dt.now()). schedule_day is validated elsewhere
+    to be 1-28, so `.replace(day=...)` is always valid regardless of month.
+    """
+    day, hour, minute = resolved_schedule(entry)
+    candidate = now.replace(day=day, hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate = (
+            candidate.replace(year=candidate.year + 1, month=1)
+            if candidate.month == 12
+            else candidate.replace(month=candidate.month + 1)
+        )
+    return candidate
 
 
 def resolved_tariff_entities(entry: ConfigEntry) -> dict[str, str]:

@@ -22,7 +22,7 @@ silently drop the rest of the month's attempts.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from homeassistant.components.persistent_notification import async_create as async_create_notification
@@ -43,6 +43,7 @@ from .const import (
     RETRY_INTERVAL_HOURS,
     RETRY_MAX_DAYS,
     TOTAL_CAMPAIGN_ATTEMPTS,
+    next_configured_occurrence,
     resolved_schedule,
     resolved_tariff_entities,
 )
@@ -59,6 +60,14 @@ def status_signal(entry_id: str) -> str:
 
 def _campaign_store_key(entry_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_campaign"
+
+
+def _period_key(moment: datetime) -> str:
+    """Calendar-month key ("YYYY-MM") used to decide whether a given
+    successful send/block still counts as "this period" (see
+    PermEnergosbytManager.period_block_is_on).
+    """
+    return f"{moment.year}-{moment.month:02d}"
 
 
 async def async_remove_campaign_store(hass: HomeAssistant, entry_id: str) -> None:
@@ -119,13 +128,41 @@ class PermEnergosbytManager:
         self.client = client
 
         self._unsub_schedule: callable | None = None
+        self._unsub_daily_refresh: callable | None = None
         self._unsub_retry: callable | None = None
         self._restore_task: asyncio.Task | None = None
         self._campaign_delays: list[int] = []
         self._campaign_index = 0
+        self._pending_resume_index = 0
         self._campaign_store = Store[dict](
             hass, _CAMPAIGN_STORE_VERSION, _campaign_store_key(entry.entry_id)
         )
+
+        # "Запрет отправки в текущем месяце" - self-managed period block.
+        # Not a plain bool: a calendar-month key ("YYYY-MM") so it clears
+        # itself once the month rolls over, with no separate expiry timer.
+        # Persisted alongside campaign_index in the same Store (loaded by
+        # async_load_persisted_state() before platforms are set up).
+        self._block_period_key: str | None = None
+
+        # "Запрет автоматической отправки" - permanent, manual-only switch.
+        # No period logic here; the switch entity itself persists this via
+        # its own RestoreEntity and writes it back on startup.
+        self.auto_send_blocked: bool = False
+
+        # Wall-clock time of the next pending automatic retry, if a
+        # campaign attempt just failed and a retry is scheduled. None when
+        # no retry is pending (success, final failure, or never started) -
+        # used by the "Дата и время отправки запланированное" sensor to
+        # show the real next automatic attempt instead of just the base
+        # monthly schedule.
+        self._next_retry_at: datetime | None = None
+
+        # Readings actually submitted on the last successful real send, one
+        # entry per tariff - for the "Последнее переданное значение Т*"
+        # sensors. Only touched on success, never on a failed/dry_run
+        # attempt.
+        self.last_sent_readings: dict[str, float] = {}
         # Serializes every real send attempt (manual button/service AND
         # scheduled/resumed campaign attempts) so two can never run at once
         # - e.g. a restart-resumed attempt landing in the same tick as the
@@ -163,12 +200,35 @@ class PermEnergosbytManager:
         self.last_success_at = success_at
         self.last_error = error
 
-    def _record_result(self, success: bool, error: str | None = None) -> None:
+    def restore_last_success_at(self, success_at: datetime | None) -> None:
+        """Narrower counterpart to restore_status(), for the dedicated
+        "Дата и время последней отправки" sensor - lets it restore
+        independently of whether the status sensor's own restore_status()
+        has run yet. Guarded on last_success_at itself (not last_status),
+        so it can't clobber a real value set either by a fresh send or by
+        the other sensor's restore, regardless of which one runs first -
+        HA does add entities from one async_add_entities() call in list
+        order, but this doesn't have to depend on that.
+        """
+        if self.last_success_at is not None or success_at is None:
+            return
+        self.last_success_at = success_at
+
+    async def _record_result(
+        self, success: bool, error: str | None = None, readings: dict[str, float] | None = None
+    ) -> None:
         self.last_attempt_at = dt_util.now()
         self.last_status = "success" if success else "failed"
         self.last_error = None if success else error
         if success:
             self.last_success_at = self.last_attempt_at
+            if readings is not None:
+                self.last_sent_readings = dict(readings)
+            # Any successful real send (manual or automatic) blocks further
+            # automatic sends for the rest of this calendar month - see
+            # period_block_is_on().
+            self._block_period_key = _period_key(self.last_attempt_at)
+            await self._save_state()
         async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
 
     # -- lifecycle -----------------------------------------------------
@@ -183,11 +243,77 @@ class PermEnergosbytManager:
         if self._unsub_schedule is not None:
             self._unsub_schedule()
             self._unsub_schedule = None
+        if self._unsub_daily_refresh is not None:
+            self._unsub_daily_refresh()
+            self._unsub_daily_refresh = None
 
         _, hour, minute = resolved_schedule(self.entry)
         self._unsub_schedule = async_track_time_change(
             self.hass, self._handle_time_tick, hour=hour, minute=minute, second=0
         )
+        # Refreshes entities whose displayed value is computed lazily and
+        # would otherwise look stale until some other event touches them -
+        # the period-block switch (clears at month rollover) and the
+        # "настроенное"/"запланированное" schedule sensors (roll to the
+        # next occurrence once the current one is in the past). Time of
+        # day is arbitrary, just needs to be once daily.
+        self._unsub_daily_refresh = async_track_time_change(
+            self.hass, self._handle_daily_refresh, hour=0, minute=1, second=0
+        )
+
+    async def async_load_persisted_state(self) -> None:
+        """Load the period-block key and any pending campaign index from
+        Store. Fast/local - awaited in __init__.py before platforms are
+        set up, so switch/sensor entities see correct values immediately
+        rather than racing a background restore task for them.
+        """
+        data = await self._campaign_store.async_load()
+        self._block_period_key = data.get("block_period_key") if data else None
+        self._pending_resume_index = (data.get("campaign_index") or 0) if data else 0
+
+    def period_block_is_on(self) -> bool:
+        """«Запрет отправки в текущем месяце» - true iff a real send already
+        succeeded this calendar month, or the user turned this on manually.
+        Self-clears once the month changes - no separate expiry timer.
+        """
+        return self._block_period_key == _period_key(dt_util.now())
+
+    async def async_set_period_block(self, value: bool) -> None:
+        """Manual override for the period-block switch.
+
+        Turning it on cancels any pending automatic retry and clears the
+        current campaign's progress - mirrors what a successful send
+        already does, so the switch actually reflects "won't send again".
+        """
+        if value:
+            self._block_period_key = _period_key(dt_util.now())
+            await self.async_reset_campaign_progress()
+        else:
+            self._block_period_key = None
+            await self._save_state()
+
+    async def async_reset_campaign_progress(self) -> None:
+        """Cancel a pending retry and reset the campaign counter to zero.
+
+        Shared by: a successful send (manual or automatic), turning on
+        either block switch, and the restore path abandoning a stale
+        campaign it's not allowed to resume. Dispatches status_signal so
+        entities showing the next planned attempt (which may have just
+        changed - a cancelled retry means "запланированное" falls back to
+        the base schedule) refresh immediately, not just on the daily tick.
+        """
+        self._cancel_pending_retry()
+        self._campaign_index = 0
+        await self._save_state()
+        async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
+
+    def next_planned_attempt(self) -> datetime:
+        """Real next automatic attempt - a pending retry if one is due
+        sooner, otherwise just the next base monthly schedule occurrence.
+        """
+        if self._next_retry_at is not None:
+            return self._next_retry_at
+        return next_configured_occurrence(self.entry, dt_util.now())
 
     async def async_restore_campaign(self) -> None:
         """Resume a retry campaign left in progress by a HA restart.
@@ -195,13 +321,13 @@ class PermEnergosbytManager:
         We don't know how long HA was offline, so we don't try to honour
         the original wall-clock retry times - we just pick the campaign
         back up immediately and continue its remaining attempts from now.
+        Whether it's actually allowed to resume (neither block switch is
+        on) is decided centrally in _run_campaign_attempt().
         """
-        data = await self._campaign_store.async_load()
-        index = data.get("campaign_index") if data else None
-        if not index:
-            return
-        if index >= TOTAL_CAMPAIGN_ATTEMPTS:
-            await self._clear_campaign_store()
+        index = self._pending_resume_index
+        if not index or index >= TOTAL_CAMPAIGN_ATTEMPTS:
+            if index:
+                await self.async_reset_campaign_progress()
             return
 
         _LOGGER.warning(
@@ -229,6 +355,9 @@ class PermEnergosbytManager:
         if self._unsub_schedule is not None:
             self._unsub_schedule()
             self._unsub_schedule = None
+        if self._unsub_daily_refresh is not None:
+            self._unsub_daily_refresh()
+            self._unsub_daily_refresh = None
         self._cancel_pending_retry()
         if self._restore_task is not None and not self._restore_task.done():
             self._restore_task.cancel()
@@ -238,12 +367,15 @@ class PermEnergosbytManager:
         if self._unsub_retry is not None:
             self._unsub_retry()
             self._unsub_retry = None
+        self._next_retry_at = None
 
-    async def _save_campaign_store(self) -> None:
-        await self._campaign_store.async_save({"campaign_index": self._campaign_index})
+    def _handle_daily_refresh(self, _now) -> None:
+        async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
 
-    async def _clear_campaign_store(self) -> None:
-        await self._campaign_store.async_remove()
+    async def _save_state(self) -> None:
+        await self._campaign_store.async_save(
+            {"campaign_index": self._campaign_index, "block_period_key": self._block_period_key}
+        )
 
     # -- scheduled campaign ---------------------------------------------
 
@@ -270,6 +402,18 @@ class PermEnergosbytManager:
         # index while it's awaiting the lock, corrupting the count.
         async with self._attempt_lock:
             if start_index is not None:
+                account = self.entry.data[CONF_ACCOUNT]
+                if self.period_block_is_on() or self.auto_send_blocked:
+                    _LOGGER.info(
+                        "PermEnergosbyt: автоматическая отправка для счёта %s не начата — "
+                        "активен «%s»",
+                        account,
+                        "запрет отправки в текущем месяце"
+                        if self.period_block_is_on()
+                        else "запрет автоматической отправки",
+                    )
+                    await self.async_reset_campaign_progress()
+                    return
                 self._campaign_delays = _campaign_delays_hours()
                 self._campaign_index = start_index
             self._campaign_index += 1
@@ -280,8 +424,7 @@ class PermEnergosbytManager:
                     self.entry.data[CONF_ACCOUNT],
                     self._campaign_index,
                 )
-                self._cancel_pending_retry()
-                await self._clear_campaign_store()
+                await self.async_reset_campaign_progress()
                 return
 
             if self._campaign_index < TOTAL_CAMPAIGN_ATTEMPTS:
@@ -293,16 +436,18 @@ class PermEnergosbytManager:
                     self.entry.data[CONF_ACCOUNT],
                     delay_hours,
                 )
-                await self._save_campaign_store()
+                await self._save_state()
+                self._next_retry_at = dt_util.now() + timedelta(hours=delay_hours)
                 self._unsub_retry = async_call_later(
                     self.hass, delay_hours * 3600, self._handle_retry_timer
                 )
             else:
                 await self._notify_failure()
-                await self._clear_campaign_store()
+                await self.async_reset_campaign_progress()
 
     async def _handle_retry_timer(self, _now) -> None:
         self._unsub_retry = None
+        self._next_retry_at = None
         await self._run_campaign_attempt()
 
     async def _notify_failure(self) -> None:
@@ -341,8 +486,7 @@ class PermEnergosbytManager:
             return
         # A successful manual send makes any pending automatic retry for
         # this month's campaign redundant.
-        self._cancel_pending_retry()
-        await self._clear_campaign_store()
+        await self.async_reset_campaign_progress()
 
     # -- shared single attempt --------------------------------------------
 
@@ -352,7 +496,7 @@ class PermEnergosbytManager:
             readings = read_tariff_readings(self.hass, resolved_tariff_entities(self.entry))
         except HomeAssistantError as err:
             if not dry_run:
-                self._record_result(False, str(err))
+                await self._record_result(False, str(err))
             if manual:
                 raise
             _LOGGER.error("PermEnergosbyt: не удалось прочитать показания для счёта %s", account)
@@ -362,7 +506,7 @@ class PermEnergosbytManager:
             form = await self.client.fetch_measure_form()
         except PermEnergosbytError as err:
             if not dry_run:
-                self._record_result(False, str(err))
+                await self._record_result(False, str(err))
             if manual:
                 raise HomeAssistantError(str(err)) from err
             _LOGGER.error("PermEnergosbyt: ошибка получения формы для счёта %s: %s", account, err)
@@ -381,7 +525,7 @@ class PermEnergosbytManager:
         try:
             result_html = await self.client.submit_measures(form, readings)
         except PermEnergosbytError as err:
-            self._record_result(False, str(err))
+            await self._record_result(False, str(err))
             if manual:
                 raise HomeAssistantError(str(err)) from err
             _LOGGER.error("PermEnergosbyt: ошибка отправки показаний для счёта %s: %s", account, err)
@@ -393,5 +537,5 @@ class PermEnergosbytManager:
         # the lk.permenergosbyt.ru cabinet after the first real send and
         # tighten this check if the site returns errors with a 2xx status.
         _LOGGER.debug("PermEnergosbyt: ответ сервера после отправки для счёта %s: %s", account, result_html)
-        self._record_result(True)
+        await self._record_result(True, readings=readings)
         return True

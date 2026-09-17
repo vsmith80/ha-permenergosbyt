@@ -24,7 +24,7 @@ from .scheduler import PermEnergosbytManager, async_remove_campaign_store
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["button", "sensor"]
+PLATFORMS = ["button", "sensor", "switch"]
 
 SEND_READINGS_SCHEMA = vol.Schema(
     {
@@ -41,6 +41,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     manager = PermEnergosbytManager(hass, entry, client)
     manager.async_setup()
+    # Fast/local Store read (no network) - must finish before the switch
+    # entities are added below, so their initial state (period block, and
+    # any pending campaign index for the restore task) is correct from the
+    # start rather than racing async_start_restore_campaign()'s background
+    # task for it.
+    await manager.async_load_persisted_state()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = manager
 
