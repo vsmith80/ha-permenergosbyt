@@ -82,15 +82,17 @@ def _campaign_delays_hours() -> list[int]:
     return [after - before for before, after in zip(offsets, offsets[1:])]
 
 
-def _read_readings(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, float]:
-    """Read the current value of every tariff sensor configured for this entry.
+def read_tariff_readings(hass: HomeAssistant, tariff_entities: dict[str, str]) -> dict[str, float]:
+    """Read the current value of each given tariff's sensor.
 
-    Works for single-, two- or three-tariff accounts alike - whichever
-    tariffs (T1, T2, T3) the user configured in resolved_tariff_entities().
+    Takes a plain {tariff: entity_id} mapping (see resolved_tariff_entities)
+    rather than a ConfigEntry, so it can be shared between real sends here
+    and config_flow.py's setup-time sensor validation, where no entry
+    exists yet. Works for any number of tariffs (1-3).
     """
     readings: dict[str, float] = {}
     missing: list[str] = []
-    for tariff, entity_id in resolved_tariff_entities(entry).items():
+    for tariff, entity_id in tariff_entities.items():
         state = hass.states.get(entity_id)
         if state is None:
             missing.append(entity_id)
@@ -347,7 +349,7 @@ class PermEnergosbytManager:
     async def _attempt(self, manual: bool, dry_run: bool = False) -> bool:
         account = self.entry.data[CONF_ACCOUNT]
         try:
-            readings = _read_readings(self.hass, self.entry)
+            readings = read_tariff_readings(self.hass, resolved_tariff_entities(self.entry))
         except HomeAssistantError as err:
             if not dry_run:
                 self._record_result(False, str(err))

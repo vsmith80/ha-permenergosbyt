@@ -18,6 +18,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -37,6 +38,7 @@ from .const import (
     resolved_schedule,
     resolved_tariff_entities,
 )
+from .scheduler import read_tariff_readings
 
 _ACCOUNT_RE = re.compile(r"^\d{10,11}$")
 
@@ -130,18 +132,32 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_tariffs(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
+        errors: dict[str, str] = {}
+        description_placeholders = {"tariffs_summary": _tariffs_summary(self._tariffs)}
         tariff_conf_keys = [TARIFF_ENTITY_CONF_KEYS[t.tariff] for t in self._tariffs]
 
         if user_input is not None:
-            # Note: the schedule-day range is already enforced by the
-            # schema below (vol.Range(min=1, max=28)) - Home Assistant
-            # validates user_input against it before this method is ever
-            # called again, so no separate check is needed here.
-            return self.async_create_entry(
-                title=f"Пермэнергосбыт {self._account}",
-                data={CONF_ACCOUNT: self._account},
-                options=_extract_options(user_input, tariff_conf_keys),
-            )
+            # The schedule-day range is already enforced by the schema
+            # below (vol.Range(min=1, max=28)) - Home Assistant validates
+            # user_input against it before this method is ever called
+            # again, so only the sensors need an explicit check here: pick
+            # up a broken/missing/non-numeric sensor right now instead of
+            # only discovering it on the first real send, weeks or months
+            # later.
+            tariff_entities = {
+                t.tariff: user_input[TARIFF_ENTITY_CONF_KEYS[t.tariff]] for t in self._tariffs
+            }
+            try:
+                read_tariff_readings(self.hass, tariff_entities)
+            except HomeAssistantError as err:
+                errors["base"] = "sensor_check_failed"
+                description_placeholders["sensor_error"] = str(err)
+            else:
+                return self.async_create_entry(
+                    title=f"Пермэнергосбыт {self._account}",
+                    data={CONF_ACCOUNT: self._account},
+                    options=_extract_options(user_input, tariff_conf_keys),
+                )
 
         tariff_defaults = {
             TARIFF_ENTITY_CONF_KEYS[t.tariff]: _SUGGESTED_DEFAULTS.get(t.tariff)
@@ -153,10 +169,17 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **_schedule_schema_fields(DEFAULT_SCHEDULE_DAY, DEFAULT_SCHEDULE_HOUR, DEFAULT_SCHEDULE_MINUTE),
             }
         )
+        if user_input is not None:
+            # Re-showing after a failed sensor check - keep whatever the
+            # user already picked instead of resetting to the suggested
+            # defaults, so fixing one bad sensor doesn't mean re-entering
+            # everything (schedule included).
+            schema = self.add_suggested_values_to_schema(schema, user_input)
         return self.async_show_form(
             step_id="tariffs",
             data_schema=schema,
-            description_placeholders={"tariffs_summary": _tariffs_summary(self._tariffs)},
+            errors=errors,
+            description_placeholders=description_placeholders,
         )
 
     @staticmethod
