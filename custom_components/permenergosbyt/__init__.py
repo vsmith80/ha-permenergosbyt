@@ -81,6 +81,11 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
     """
     manager: PermEnergosbytManager = hass.data[DOMAIN][entry.entry_id]
     manager.async_setup()
+    # Otherwise "настроенное"/"запланированное" keep showing the old
+    # schedule until some unrelated event (a send, a switch toggle, the
+    # daily tick) happens to fire the same signal - reported by the user
+    # after changing the schedule day and seeing no immediate update.
+    manager.notify_state_changed()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

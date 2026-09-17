@@ -372,6 +372,18 @@ class PermEnergosbytManager:
     def _handle_daily_refresh(self, _now) -> None:
         async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
 
+    def notify_state_changed(self) -> None:
+        """Push a display refresh to every entity listening on status_signal.
+
+        Needed whenever something other than a real send/campaign-reset
+        changes a value they show - currently only the options-flow
+        schedule change (day/hour/minute), which otherwise leaves the
+        "настроенное"/"запланированное" sensors showing the old schedule
+        until an unrelated event (a send, a switch toggle, the daily tick)
+        happens to fire this same signal.
+        """
+        async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
+
     async def _save_state(self) -> None:
         await self._campaign_store.async_save(
             {"campaign_index": self._campaign_index, "block_period_key": self._block_period_key}
