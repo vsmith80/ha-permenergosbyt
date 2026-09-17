@@ -93,20 +93,6 @@ HACS — `hacs.json` в корне и заполненные поля `manifest.
 пересматривать его не требуется. Лицевой счёт менять после установки
 нельзя — для другого счёта нужно добавить интеграцию заново.
 
-## Иконка
-
-Файлы иконки лежат в `brands/permenergosbyt/` (`icon.png` 256×256,
-`icon@2x.png` 512×512) — оригинальный дизайн (не логотип компании), просто
-чтобы не выглядело как имитация чужого бренда.
-
-Home Assistant не показывает иконки из папки `custom_components` напрямую —
-они подтягиваются из отдельного репозитория
-[home-assistant/brands](https://github.com/home-assistant/brands). Чтобы
-иконка появилась в UI HA и в HACS, файлы из `brands/permenergosbyt/` нужно
-отправить туда Pull Request'ом в `custom_integrations/permenergosbyt/`.
-Без этого шага HA покажет стандартную generic-иконку интеграции — это не
-мешает работе, просто выглядит менее узнаваемо.
-
 ## Известные ограничения
 
 - Реальная отправка показаний (`action=save_measure`) через кнопку
@@ -125,35 +111,6 @@ Home Assistant не показывает иконки из папки `custom_co
 - Нет капчи и CSRF-токена в используемой форме на момент разработки — если
   сайт добавит защиту от автоматических запросов, интеграция перестанет
   работать без обновления.
-
-## Тестирование
-
-```
-python3 -m venv .venv
-.venv/bin/pip install -r requirements_test.txt
-.venv/bin/python -m pytest tests/ -v
-```
-
-Покрыто модульными тестами (без реального Home Assistant — файлы
-компонента загружаются напрямую через `importlib`, минуя
-`custom_components/permenergosbyt/__init__.py`):
-
-- `api.py` — парсинг HTML-формы сайта (на реальных, захваченных с
-  lk.permenergosbyt.ru образцах в `tests/fixtures/`, для 1/2/3-тарифных
-  вариантов) и HTTP-клиент (`fetch_measure_form`/`submit_measures` —
-  через самодельные fake-объекты вместо `aioresponses`, которая на
-  момент разработки была несовместима с актуальной версией `aiohttp`).
-- `const.py` — чистые функции `resolved_schedule`/`resolved_tariff_entities`/
-  `device_info` (нужен минимальный stub для `homeassistant.config_entries`/
-  `homeassistant.helpers.device_registry`, если полный пакет `homeassistant`
-  не установлен — см. `tests/conftest.py`).
-
-Логика в `scheduler.py`, `config_flow.py`, `sensor.py`/`button.py` пока
-не покрыта — там нужен `pytest-homeassistant-custom-component` с реальным
-тестовым `hass` (таймеры, `Store`, dispatcher, config flow). Как и раньше:
-тесты проверяют, что наш код делает то, что задумано, при заданном ответе
-сайта — не то, что сайт реально себя так ведёт (маркер успеха/неудачи в
-ответе на `save_measure` по-прежнему не подтверждён вживую).
 
 ## Лицензия
 
