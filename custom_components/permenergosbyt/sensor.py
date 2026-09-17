@@ -66,7 +66,7 @@ class PermEnergosbytStatusSensor(SensorEntity, RestoreEntity):
                 error=last_state.attributes.get("last_error"),
             )
 
-        self.async_on_unload(
+        self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, status_signal(self._entry_id), self.async_write_ha_state
             )
