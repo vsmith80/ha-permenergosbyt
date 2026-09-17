@@ -205,13 +205,27 @@ class PermEnergosbytOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
         current = resolved_tariff_entities(self._config_entry)
         tariff_conf_keys = [TARIFF_ENTITY_CONF_KEYS[tariff] for tariff in current]
 
         if user_input is not None:
             # The schedule-day range is enforced by the schema below, so
-            # any submitted value reaching this line is already valid.
-            return self.async_create_entry(data=_extract_options(user_input, tariff_conf_keys))
+            # only the sensors need an explicit check here - same as
+            # async_step_tariffs during setup: catch a repointed sensor
+            # that's missing/non-numeric right now, not on the next real
+            # send.
+            tariff_entities = {
+                tariff: user_input[TARIFF_ENTITY_CONF_KEYS[tariff]] for tariff in current
+            }
+            try:
+                read_tariff_readings(self.hass, tariff_entities)
+            except HomeAssistantError as err:
+                errors["base"] = "sensor_check_failed"
+                description_placeholders["sensor_error"] = str(err)
+            else:
+                return self.async_create_entry(data=_extract_options(user_input, tariff_conf_keys))
 
         tariff_defaults = {
             TARIFF_ENTITY_CONF_KEYS[tariff]: entity_id for tariff, entity_id in current.items()
@@ -223,4 +237,13 @@ class PermEnergosbytOptionsFlow(config_entries.OptionsFlow):
                 **_schedule_schema_fields(day_default, hour_default, minute_default),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        if user_input is not None:
+            # Re-showing after a failed sensor check - keep what the user
+            # already entered instead of resetting to the current options.
+            schema = self.add_suggested_values_to_schema(schema, user_input)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
