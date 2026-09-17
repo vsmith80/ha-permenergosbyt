@@ -24,7 +24,8 @@
     "error": {
       "invalid_account": "Лицевой счёт должен состоять из 10 или 11 цифр",
       "account_not_found": "Лицевой счёт не найден на сайте lk.permenergosbyt.ru",
-      "cannot_connect": "Не удалось подключиться к lk.permenergosbyt.ru"
+      "cannot_connect": "Не удалось подключиться к lk.permenergosbyt.ru",
+      "unsupported_tariff_count": "У этого счётчика тариф вне поддерживаемого диапазона Т1-Т3 — интеграция пока не умеет с ним работать"
     },
     "abort": {
       "already_configured": "Этот лицевой счёт уже добавлен"

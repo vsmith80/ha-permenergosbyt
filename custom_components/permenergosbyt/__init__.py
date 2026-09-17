@@ -41,11 +41,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     manager = PermEnergosbytManager(hass, entry, client)
     manager.async_setup()
-    await manager.async_restore_campaign()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = manager
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Resume any campaign interrupted by a restart only after the sensor
+    # exists and has restored its last known status - otherwise a resumed
+    # attempt can set last_status before restore_status() ever runs,
+    # silently discarding a real historical last_success_at (see
+    # PermEnergosbytManager.restore_status's "never" guard). Fired as a
+    # background task, not awaited, since it can make a live network call
+    # to a site that's been observed to hang up to ~60s - awaiting it here
+    # would block this entry's whole setup on that.
+    hass.async_create_task(manager.async_restore_campaign())
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 

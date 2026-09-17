@@ -112,9 +112,17 @@ class PermEnergosbytConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except PermEnergosbytError:
                     errors["base"] = "cannot_connect"
                 else:
-                    self._account = account
-                    self._tariffs = form.tariffs
-                    return await self.async_step_tariffs()
+                    # api.py's _ROW_RE accepts any single-digit tariff
+                    # (T0-T9), but this integration only has sensor
+                    # pickers for T1-T3 - reject anything else here with
+                    # a clear message instead of a KeyError deeper in
+                    # async_step_tariffs.
+                    if any(t.tariff not in TARIFF_ENTITY_CONF_KEYS for t in form.tariffs):
+                        errors["base"] = "unsupported_tariff_count"
+                    else:
+                        self._account = account
+                        self._tariffs = form.tariffs
+                        return await self.async_step_tariffs()
 
         schema = vol.Schema({vol.Required(CONF_ACCOUNT): str})
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)

@@ -21,6 +21,7 @@ silently drop the rest of the month's attempts.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import logging
 
@@ -122,6 +123,13 @@ class PermEnergosbytManager:
         self._campaign_store = Store[dict](
             hass, _CAMPAIGN_STORE_VERSION, _campaign_store_key(entry.entry_id)
         )
+        # Serializes every real send attempt (manual button/service AND
+        # scheduled/resumed campaign attempts) so two can never run at once
+        # - e.g. a restart-resumed attempt landing in the same tick as the
+        # monthly schedule firing, or a manual send racing an in-flight
+        # automatic retry, would otherwise both submit to the site
+        # concurrently and could corrupt _campaign_index bookkeeping.
+        self._attempt_lock = asyncio.Lock()
 
         # Status of the last REAL (non dry-run) send attempt, for the
         # diagnostic sensor - "never" | "success" | "failed". Broadcast via
@@ -241,34 +249,37 @@ class PermEnergosbytManager:
         await self._run_campaign_attempt()
 
     async def _run_campaign_attempt(self) -> None:
-        self._campaign_index += 1
-        success = await self._attempt(manual=False)
-        if success:
-            _LOGGER.info(
-                "PermEnergosbyt: показания для счёта %s успешно отправлены (попытка %d)",
-                self.entry.data[CONF_ACCOUNT],
-                self._campaign_index,
-            )
-            self._cancel_pending_retry()
-            await self._clear_campaign_store()
-            return
+        # Locked so a resumed (restart) attempt can never overlap a fresh
+        # scheduled tick, and neither can overlap a concurrent manual send.
+        async with self._attempt_lock:
+            self._campaign_index += 1
+            success = await self._attempt(manual=False)
+            if success:
+                _LOGGER.info(
+                    "PermEnergosbyt: показания для счёта %s успешно отправлены (попытка %d)",
+                    self.entry.data[CONF_ACCOUNT],
+                    self._campaign_index,
+                )
+                self._cancel_pending_retry()
+                await self._clear_campaign_store()
+                return
 
-        if self._campaign_index < TOTAL_CAMPAIGN_ATTEMPTS:
-            delay_hours = self._campaign_delays[self._campaign_index - 1]
-            _LOGGER.warning(
-                "PermEnergosbyt: попытка %d/%d для счёта %s не удалась, повтор через %d ч",
-                self._campaign_index,
-                TOTAL_CAMPAIGN_ATTEMPTS,
-                self.entry.data[CONF_ACCOUNT],
-                delay_hours,
-            )
-            await self._save_campaign_store()
-            self._unsub_retry = async_call_later(
-                self.hass, delay_hours * 3600, self._handle_retry_timer
-            )
-        else:
-            await self._notify_failure()
-            await self._clear_campaign_store()
+            if self._campaign_index < TOTAL_CAMPAIGN_ATTEMPTS:
+                delay_hours = self._campaign_delays[self._campaign_index - 1]
+                _LOGGER.warning(
+                    "PermEnergosbyt: попытка %d/%d для счёта %s не удалась, повтор через %d ч",
+                    self._campaign_index,
+                    TOTAL_CAMPAIGN_ATTEMPTS,
+                    self.entry.data[CONF_ACCOUNT],
+                    delay_hours,
+                )
+                await self._save_campaign_store()
+                self._unsub_retry = async_call_later(
+                    self.hass, delay_hours * 3600, self._handle_retry_timer
+                )
+            else:
+                await self._notify_failure()
+                await self._clear_campaign_store()
 
     async def _handle_retry_timer(self, _now) -> None:
         self._unsub_retry = None
@@ -302,12 +313,16 @@ class PermEnergosbytManager:
         _attempt(manual=True, ...) always raises on failure, so reaching
         the end of this method means the attempt succeeded.
         """
-        await self._attempt(manual=True, dry_run=dry_run)
+        async with self._attempt_lock:
+            await self._attempt(manual=True, dry_run=dry_run)
+        if dry_run:
+            # A dry_run is just a test - it must not disturb a real
+            # campaign's pending retry, only a genuine send should.
+            return
         # A successful manual send makes any pending automatic retry for
         # this month's campaign redundant.
         self._cancel_pending_retry()
-        if not dry_run:
-            await self._clear_campaign_store()
+        await self._clear_campaign_store()
 
     # -- shared single attempt --------------------------------------------
 
