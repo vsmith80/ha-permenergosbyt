@@ -1,5 +1,15 @@
 # Пермэнергосбыт — передача показаний (Home Assistant)
 
+**English:** A custom Home Assistant integration for
+[Perm Energosbyt](https://lk.permenergosbyt.ru/) — a regional electricity
+utility in Perm, Russia. Once a month, it automatically submits your
+meter's current readings (single/dual/triple-tariff, T1/T2/T3) to the
+utility's website, reading the values from your existing Home Assistant
+sensors. It retries on failure, supports a manual send, and provides
+switches/sensors to control and monitor the process. Since it only works
+with this one specific Russian utility's website, the rest of this
+document is in Russian.
+
 Кастомная интеграция для Home Assistant, которая раз в месяц автоматически
 передаёт показания электросчётчика в личный кабинет
 [«Пермэнергосбыт»](https://lk.permenergosbyt.ru/), используя те же значения,
