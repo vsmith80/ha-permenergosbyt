@@ -118,6 +118,7 @@ class PermEnergosbytManager:
 
         self._unsub_schedule: callable | None = None
         self._unsub_retry: callable | None = None
+        self._restore_task: asyncio.Task | None = None
         self._campaign_delays: list[int] = []
         self._campaign_index = 0
         self._campaign_store = Store[dict](
@@ -208,9 +209,18 @@ class PermEnergosbytManager:
             index,
             TOTAL_CAMPAIGN_ATTEMPTS,
         )
-        self._campaign_delays = _campaign_delays_hours()
-        self._campaign_index = index
-        await self._run_campaign_attempt()
+        await self._run_campaign_attempt(start_index=index)
+
+    def async_start_restore_campaign(self) -> None:
+        """Fire async_restore_campaign() as a task tracked for cancellation.
+
+        Called from __init__.py right after platform setup. Kept as a
+        tracked task (not bare hass.async_create_task) so async_unload()
+        can cancel it - otherwise it could outlive a removed/reloaded
+        entry and re-arm a retry timer for an account no longer tracked
+        in hass.data.
+        """
+        self._restore_task = self.hass.async_create_task(self.async_restore_campaign())
 
     def async_unload(self) -> None:
         """Stop everything for this entry (used only on actual unload/removal)."""
@@ -218,6 +228,9 @@ class PermEnergosbytManager:
             self._unsub_schedule()
             self._unsub_schedule = None
         self._cancel_pending_retry()
+        if self._restore_task is not None and not self._restore_task.done():
+            self._restore_task.cancel()
+        self._restore_task = None
 
     def _cancel_pending_retry(self) -> None:
         if self._unsub_retry is not None:
@@ -244,14 +257,19 @@ class PermEnergosbytManager:
             self.entry.data[CONF_ACCOUNT],
         )
         self._cancel_pending_retry()
-        self._campaign_delays = _campaign_delays_hours()
-        self._campaign_index = 0
-        await self._run_campaign_attempt()
+        await self._run_campaign_attempt(start_index=0)
 
-    async def _run_campaign_attempt(self) -> None:
+    async def _run_campaign_attempt(self, start_index: int | None = None) -> None:
         # Locked so a resumed (restart) attempt can never overlap a fresh
         # scheduled tick, and neither can overlap a concurrent manual send.
+        # start_index (re)initializes the counter/delays *inside* the lock,
+        # not before it - doing that reset in the callers instead would let
+        # a fresh _start_campaign() clobber an in-flight resumed attempt's
+        # index while it's awaiting the lock, corrupting the count.
         async with self._attempt_lock:
+            if start_index is not None:
+                self._campaign_delays = _campaign_delays_hours()
+                self._campaign_index = start_index
             self._campaign_index += 1
             success = await self._attempt(manual=False)
             if success:
