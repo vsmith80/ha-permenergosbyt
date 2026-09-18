@@ -16,9 +16,12 @@ python3 -m venv .venv
   через самодельные fake-объекты вместо `aioresponses`, которая на
   момент разработки была несовместима с актуальной версией `aiohttp`).
 - `const.py` — чистые функции `resolved_schedule`/`resolved_tariff_entities`/
-  `device_info` (нужен минимальный stub для `homeassistant.config_entries`/
-  `homeassistant.helpers.device_registry`, если полный пакет `homeassistant`
-  не установлен — см. `tests/conftest.py`).
+  `device_info`/`next_configured_occurrence` (нужен минимальный stub для
+  `homeassistant.config_entries`/`homeassistant.helpers.device_registry`,
+  если полный пакет `homeassistant` не установлен — см. `tests/conftest.py`).
+- `background_tasks.py` — отмена фоновых задач (`BackgroundTasks`),
+  используется `scheduler.py` для отмены висящих попыток отправки при
+  выгрузке интеграции; чистый asyncio, без Home Assistant вообще.
 
 Логика в `scheduler.py`, `config_flow.py`, `sensor.py`/`button.py`/`switch.py`
 пока не покрыта — там нужен `pytest-homeassistant-custom-component` с

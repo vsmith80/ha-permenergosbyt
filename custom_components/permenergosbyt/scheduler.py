@@ -28,7 +28,7 @@ import math
 
 from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change
@@ -36,6 +36,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .api import PermEnergosbytClient, PermEnergosbytError
+from .background_tasks import BackgroundTasks
 from .const import (
     CONF_ACCOUNT,
     DOMAIN,
@@ -137,8 +138,12 @@ class PermEnergosbytManager:
         self._unsub_schedule: callable | None = None
         self._unsub_daily_refresh: callable | None = None
         self._unsub_retry: callable | None = None
-        self._restore_task: asyncio.Task | None = None
-        self._campaign_task: asyncio.Task | None = None
+        # Tracks every fire-and-forget task that can run a campaign attempt
+        # in the background - the restart-resume task, a scheduled-tick
+        # start, and a fired retry timer - any of which can overlap another
+        # (e.g. a schedule change mid-retry) and none of which may be left
+        # running past async_unload(). See background_tasks.py.
+        self._background_tasks = BackgroundTasks()
         self._campaign_delays: list[int] = []
         self._campaign_index = 0
         self._pending_resume_index = 0
@@ -350,13 +355,12 @@ class PermEnergosbytManager:
     def async_start_restore_campaign(self) -> None:
         """Fire async_restore_campaign() as a task tracked for cancellation.
 
-        Called from __init__.py right after platform setup. Kept as a
-        tracked task (not bare hass.async_create_task) so async_unload()
-        can cancel it - otherwise it could outlive a removed/reloaded
-        entry and re-arm a retry timer for an account no longer tracked
-        in hass.data.
+        Called from __init__.py right after platform setup. Tracked (not a
+        bare hass.async_create_task) so async_unload() can cancel it -
+        otherwise it could outlive a removed/reloaded entry and re-arm a
+        retry timer for an account no longer tracked in hass.data.
         """
-        self._restore_task = self.hass.async_create_task(self.async_restore_campaign())
+        self._background_tasks.track(self.hass.async_create_task(self.async_restore_campaign()))
 
     def async_unload(self) -> None:
         """Stop everything for this entry (used only on actual unload/removal)."""
@@ -367,12 +371,7 @@ class PermEnergosbytManager:
             self._unsub_daily_refresh()
             self._unsub_daily_refresh = None
         self._cancel_pending_retry()
-        if self._restore_task is not None and not self._restore_task.done():
-            self._restore_task.cancel()
-        self._restore_task = None
-        if self._campaign_task is not None and not self._campaign_task.done():
-            self._campaign_task.cancel()
-        self._campaign_task = None
+        self._background_tasks.cancel_all()
 
     def _cancel_pending_retry(self) -> None:
         if self._unsub_retry is not None:
@@ -380,6 +379,7 @@ class PermEnergosbytManager:
             self._unsub_retry = None
         self._next_retry_at = None
 
+    @callback
     def _handle_daily_refresh(self, _now) -> None:
         async_dispatcher_send(self.hass, status_signal(self.entry.entry_id))
 
@@ -402,15 +402,12 @@ class PermEnergosbytManager:
 
     # -- scheduled campaign ---------------------------------------------
 
+    @callback
     def _handle_time_tick(self, now) -> None:
         scheduled_day, _, _ = resolved_schedule(self.entry)
         if now.day != scheduled_day:
             return
-        # Tracked (not a bare hass.async_create_task) so async_unload() can
-        # cancel it - same reasoning as _restore_task: otherwise it could
-        # keep running past an unload/removal and re-arm a retry timer for
-        # an account no longer tracked in hass.data.
-        self._campaign_task = self.hass.async_create_task(self._start_campaign())
+        self._background_tasks.track(self.hass.async_create_task(self._start_campaign()))
 
     async def _start_campaign(self) -> None:
         _LOGGER.info(
@@ -487,10 +484,18 @@ class PermEnergosbytManager:
                 await self._notify_failure()
                 await self.async_reset_campaign_progress()
 
-    async def _handle_retry_timer(self, _now) -> None:
+    @callback
+    def _handle_retry_timer(self, _now) -> None:
+        # Must be a plain @callback, not `async def` - async_call_later
+        # classifies an undecorated function as an executor job (runs it in
+        # a worker thread), where hass.async_create_task() would be unsafe.
+        # Tracked in _background_tasks like _handle_time_tick's task, since
+        # it can legitimately overlap one (e.g. a schedule change fires a
+        # fresh campaign while an old retry from the previous one is still
+        # in flight) and both must be cancellable on unload.
         self._unsub_retry = None
         self._next_retry_at = None
-        await self._run_campaign_attempt()
+        self._background_tasks.track(self.hass.async_create_task(self._run_campaign_attempt()))
 
     async def _notify_failure(self) -> None:
         account = self.entry.data[CONF_ACCOUNT]
