@@ -136,7 +136,10 @@ class PermEnergosbytClient:
             ) as resp:
                 resp.raise_for_status()
                 html = await resp.text()
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, TimeoutError) as err:
+            # TimeoutError (asyncio.TimeoutError) is NOT a subclass of
+            # aiohttp.ClientError - a request timeout would otherwise
+            # propagate uncaught past this method.
             raise PermEnergosbytError(f"Ошибка соединения с lk.permenergosbyt.ru: {err}") from err
 
         return _parse_measure_form(html)
@@ -169,5 +172,5 @@ class PermEnergosbytClient:
             ) as resp:
                 resp.raise_for_status()
                 return await resp.text()
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, TimeoutError) as err:
             raise PermEnergosbytError(f"Ошибка отправки показаний: {err}") from err

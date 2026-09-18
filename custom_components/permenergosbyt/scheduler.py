@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import math
 
 from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.config_entries import ConfigEntry
@@ -107,11 +108,17 @@ def read_tariff_readings(hass: HomeAssistant, tariff_entities: dict[str, str]) -
             missing.append(entity_id)
             continue
         try:
-            readings[tariff] = float(state.state)
+            value = float(state.state)
         except ValueError as err:
             raise HomeAssistantError(
                 f"Значение сенсора {entity_id} ({tariff}) должно быть числом"
             ) from err
+        if not math.isfinite(value) or value < 0:
+            raise HomeAssistantError(
+                f"Значение сенсора {entity_id} ({tariff}) должно быть "
+                "неотрицательным конечным числом"
+            )
+        readings[tariff] = value
 
     if missing:
         raise HomeAssistantError(f"Не найдены сущности с показаниями: {', '.join(missing)}")
@@ -131,6 +138,7 @@ class PermEnergosbytManager:
         self._unsub_daily_refresh: callable | None = None
         self._unsub_retry: callable | None = None
         self._restore_task: asyncio.Task | None = None
+        self._campaign_task: asyncio.Task | None = None
         self._campaign_delays: list[int] = []
         self._campaign_index = 0
         self._pending_resume_index = 0
@@ -362,6 +370,9 @@ class PermEnergosbytManager:
         if self._restore_task is not None and not self._restore_task.done():
             self._restore_task.cancel()
         self._restore_task = None
+        if self._campaign_task is not None and not self._campaign_task.done():
+            self._campaign_task.cancel()
+        self._campaign_task = None
 
     def _cancel_pending_retry(self) -> None:
         if self._unsub_retry is not None:
@@ -395,7 +406,11 @@ class PermEnergosbytManager:
         scheduled_day, _, _ = resolved_schedule(self.entry)
         if now.day != scheduled_day:
             return
-        self.hass.async_create_task(self._start_campaign())
+        # Tracked (not a bare hass.async_create_task) so async_unload() can
+        # cancel it - same reasoning as _restore_task: otherwise it could
+        # keep running past an unload/removal and re-arm a retry timer for
+        # an account no longer tracked in hass.data.
+        self._campaign_task = self.hass.async_create_task(self._start_campaign())
 
     async def _start_campaign(self) -> None:
         _LOGGER.info(
@@ -404,6 +419,16 @@ class PermEnergosbytManager:
         )
         self._cancel_pending_retry()
         await self._run_campaign_attempt(start_index=0)
+
+    def _log_blocked(self) -> None:
+        _LOGGER.info(
+            "PermEnergosbyt: автоматическая отправка для счёта %s остановлена — "
+            "активен «%s»",
+            self.entry.data[CONF_ACCOUNT],
+            "запрет отправки в текущем месяце"
+            if self.period_block_is_on()
+            else "запрет автоматической отправки",
+        )
 
     async def _run_campaign_attempt(self, start_index: int | None = None) -> None:
         # Locked so a resumed (restart) attempt can never overlap a fresh
@@ -414,20 +439,14 @@ class PermEnergosbytManager:
         # index while it's awaiting the lock, corrupting the count.
         async with self._attempt_lock:
             if start_index is not None:
-                account = self.entry.data[CONF_ACCOUNT]
-                if self.period_block_is_on() or self.auto_send_blocked:
-                    _LOGGER.info(
-                        "PermEnergosbyt: автоматическая отправка для счёта %s не начата — "
-                        "активен «%s»",
-                        account,
-                        "запрет отправки в текущем месяце"
-                        if self.period_block_is_on()
-                        else "запрет автоматической отправки",
-                    )
-                    await self.async_reset_campaign_progress()
-                    return
                 self._campaign_delays = _campaign_delays_hours()
                 self._campaign_index = start_index
+
+            if self.period_block_is_on() or self.auto_send_blocked:
+                self._log_blocked()
+                await self.async_reset_campaign_progress()
+                return
+
             self._campaign_index += 1
             success = await self._attempt(manual=False)
             if success:
@@ -436,6 +455,17 @@ class PermEnergosbytManager:
                     self.entry.data[CONF_ACCOUNT],
                     self._campaign_index,
                 )
+                await self.async_reset_campaign_progress()
+                return
+
+            if self.period_block_is_on() or self.auto_send_blocked:
+                # Blocked while _attempt()'s network call was in flight -
+                # don't schedule another retry despite the failure. Checked
+                # again here (not just at the top of this method) because
+                # the block could have been turned on after this attempt
+                # already started, while it was awaiting the site's
+                # response.
+                self._log_blocked()
                 await self.async_reset_campaign_progress()
                 return
 
