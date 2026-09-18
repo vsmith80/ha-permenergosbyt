@@ -127,6 +127,14 @@ def read_tariff_readings(hass: HomeAssistant, tariff_entities: dict[str, str]) -
     return readings
 
 
+class _AttemptBlocked(Exception):
+    """Internal signal: an automatic attempt was blocked between fetching
+    the form and submitting it - not a failure, just means _attempt()
+    stopped short of a real POST. Raised only for manual=False; a manual
+    send is never subject to the block switches.
+    """
+
+
 class PermEnergosbytManager:
     """Owns the monthly schedule and the retry campaign for one лицевой счёт."""
 
@@ -445,7 +453,15 @@ class PermEnergosbytManager:
                 return
 
             self._campaign_index += 1
-            success = await self._attempt(manual=False)
+            try:
+                success = await self._attempt(manual=False)
+            except _AttemptBlocked:
+                # Blocked while _attempt() was fetching the form (up to
+                # ~60s) - it stopped short of submitting. Same handling as
+                # being blocked before this attempt even started.
+                self._log_blocked()
+                await self.async_reset_campaign_progress()
+                return
             if success:
                 _LOGGER.info(
                     "PermEnergosbyt: показания для счёта %s успешно отправлены (попытка %d)",
@@ -568,6 +584,12 @@ class PermEnergosbytManager:
                 form.meter_number,
             )
             return True
+
+        if not manual and (self.period_block_is_on() or self.auto_send_blocked):
+            # Blocked while fetch_measure_form() was in flight (it can take
+            # up to ~60s) - the form we just got back is still valid, but
+            # don't go ahead and submit it now that a block is active.
+            raise _AttemptBlocked
 
         try:
             result_html = await self.client.submit_measures(form, readings)
